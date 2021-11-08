@@ -1,0 +1,209 @@
+#!/usr/bin/env python
+
+import rospy
+import math
+from geometry_msgs.msg import Pose, Twist
+from nav_msgs.msg import Odometry
+from std_msgs.msg import Empty
+import tf.transformations
+from sensor_msgs.msg import Range
+from ar_track_alvar_msgs.msg import AlvarMarkers
+from tf import transformations
+
+
+class Drone:
+    def __init__(self):
+        self.vel_pub = rospy.Publisher("/tello/cmd_vel", Twist, queue_size=10)
+        self.pose_sub = rospy.Subscriber(
+            "/ar_pose_marker", AlvarMarkers, callback=self.ar_pose_callback)
+        self.r = rospy.Rate(5)  # 10hz, every 0.1 seconds
+        self.robot_vel = Twist()
+        self.current_distance = 0
+        self.rx = 0
+        self.ry = 0
+        self.rz = 1
+        self.yaw = 0
+        self.goal_x = 0
+        self.goal_y = 0
+        self.goal_z = 0
+        self.goal_theta = 0
+        self.goal_distance = 0
+        self.angle_wrt_robot = 0
+        self.reach_goal = False
+
+        # PID inits
+        self.previous_error = 0
+        self.sum_error = 0
+
+        self.sum_error_angle = 0
+        self.previous_error_angle = 0
+
+        self.sum_error_alt = 0
+        self.previous_error_alt = 0
+        self.start()
+
+    # function calculates the euclidean distance btn goal and robot position
+    def calc_distance(self, x, y, goal_x, goal_y):
+        # print(x, y, goal_x, goal_y)
+        try:
+            return math.sqrt((goal_x-x)**2 + (goal_y-y)**2)
+        except:
+            return 0
+
+    # function calculates the turn angle in degrees
+    def calc_angle(self, x, y):
+        return math.atan2(y-self.ry, x-self.rx)
+
+    # just a speed remapper
+    def speed_remap(self, speed, in_min, in_max, out_min, out_max):
+        return float((speed - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
+
+    def distance_p_controller(self):
+        self.goal_distance = self.goal_z
+        self.goal_distance = round(self.goal_distance, 2)
+        # print(self.rx, self.ry, self.goal_x, self.goal_y)
+        print("Goal_distance:", self.goal_distance)
+
+        if self.goal_distance > 0.25:
+
+            self.P_term = self.goal_distance * KP_distance
+            self.I_term = self.sum_error * KI_distance
+            self.D_term = self.previous_error * KD_distance
+            PID = self.P_term + self.I_term + self.D_term
+            self.Pout_distance = self.speed_remap(PID, 0, 1, 0, speed)
+            # print("Calculated PID: ", PID)
+            # print("Speed remap:", self.Pout_distance)
+
+            # update parameters
+            self.sum_error += self.goal_distance
+            self.previous_error = self.goal_distance
+
+            if self.goal_distance < 0.265:
+                print("HEY")
+                self.robot_vel.linear.y = 0
+                self.reach_goal = True
+            else:
+                self.robot_vel.linear.y = self.Pout_distance
+        else:
+            self.robot_vel.linear.y = 0
+
+        self.vel_pub.publish(self.robot_vel)
+
+    def yaw_controller(self):
+
+        # goal orientation(error) = desired angle from user - robot's current angle
+        self.goal_angle = round(self.goal_x, 2)
+        print("AR_goal:", self.goal_angle)
+
+        if self.goal_distance > 0.15:  # and not self.reach_goal:
+            # orienting robot to face goal position
+
+            if abs(self.goal_angle) > 0:
+                self.P_term = self.goal_angle * KP_angle
+                self.I_term = self.sum_error_angle * KI_angle
+                self.D_term = self.previous_error_angle * KD_angle
+                PID_ang = self.P_term + self.I_term + self.D_term
+                print("PID Angle:", PID_ang)
+
+                self.Pout_angle = self.speed_remap(
+                    PID_ang, -hori_bound, hori_bound, -speed, speed)
+
+                self.robot_vel.angular.z = self.Pout_angle
+
+                # update parameters
+                self.sum_error_angle += self.goal_angle
+                self.previous_error_angle = self.goal_angle
+
+                print("Pout_angle: ", self.Pout_angle)
+            else:
+                self.robot_vel.angular.z = 0
+
+        self.vel_pub.publish(self.robot_vel)
+
+    def altitude_controller(self):
+        self.goal_altitude = round(self.goal_y, 2)
+
+        if abs(self.goal_altitude) > 0:
+            self.P_term = self.goal_altitude * KP_alt
+            self.I_term = self.sum_error_alt * KI_alt
+            self.D_term = self.previous_error_alt * KD_alt
+            PID_alt = self.P_term + self.I_term + self.D_term
+            print("PID Alt:", PID_alt)
+
+            self.Pout_alt = self.speed_remap(
+                PID_alt, -vert_bound, vert_bound, -speed, speed)
+
+            self.robot_vel.linear.z = -self.Pout_alt
+
+            # update parameters
+            self.sum_error_alt += self.goal_altitude
+            self.previous_error_alt = self.goal_altitude
+            print("Pout_alt: ", self.Pout_alt)
+        else:
+            self.robot_vel.linear.z = 0
+
+        self.vel_pub.publish(self.robot_vel)
+
+    def robot_position(self, msg):
+        self.rx, self.ry, self.rz = msg.position.x, msg.position.y, msg.position.z
+        q = msg.orientation.x, msg.orientation.y, msg.orientation.z, msg.orientation.w
+        # convert quartenion to roll, pitch, yaw
+        roll, pitch, self.yaw = tf.transformations.euler_from_quaternion(q)
+
+        # print("[ROS INFO] roll:{:.2f}, pitch:{:.2f}, yaw:{:.2f}".format(roll, pitch, self.yaw))
+
+    def ar_pose_callback(self, ar_msg):
+        if len(ar_msg.markers) > 0:
+            # position of the AR tag
+            self.goal_x = ar_msg.markers[0].pose.pose.position.x
+            self.goal_y = ar_msg.markers[0].pose.pose.position.y
+            self.goal_z = ar_msg.markers[0].pose.pose.position.z
+            # print("[ROS INFO] x:{:.2f}, y:{:.2f}, z:{:.2f}".format(self.goal_x, self.goal_y, self.goal_z))
+
+            # orientation of the AR tag
+            # roll, pitch, yaw = transformations.euler_from_quaternion(
+            #     [ar_msg.markers[0].pose.pose.orientation.x, ar_msg.markers[0].pose.pose.orientation.y, ar_msg.markers[0].pose.pose.orientation.z, ar_msg.markers[0].pose.pose.orientation.w])
+            # # print("[ROS INFO] roll:{:.2f}, pitch:{:.2f}, yaw:{:.2f}".format(roll, pitch, yaw))
+        else:
+            print("No AR tag detected")
+            self.goal_x = 0
+            self.goal_y = 0
+            self.goal_z = 0
+
+    def start(self):
+        while not rospy.is_shutdown():
+            self.yaw_controller()
+            self.distance_p_controller()
+            self.altitude_controller()
+
+            self.r.sleep()
+
+
+if __name__ == "__main__":
+
+    rospy.init_node("drone_track_ar_node", anonymous=True)
+    try:
+        # PID constants for distance controller
+        KP_distance = 0.30
+        KI_distance = 0.001
+        KD_distance = 0.08
+
+        # PID constants for angular controller
+        KP_angle = 0.66
+        KI_angle = 0.0
+        KD_angle = 0.35
+
+        # PID constants for altitude controller
+        KP_alt = 0.6
+        KI_alt = 0.0
+        KD_alt = 0.14
+
+        # Inits
+        speed = 1.0
+        vert_bound = 0.1
+        hori_bound = 0.1
+
+        Drone()
+        rospy.spin()
+    except KeyboardInterrupt:
+        pass
