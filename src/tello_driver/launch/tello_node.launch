@@ -1,0 +1,46 @@
+<?xml version="1.0"?>
+<launch>
+	<arg name="tello_ip" default="192.168.10.1" />
+	<arg name="tello_cmd_server_port"	default="8889" />
+	<arg name="local_cmd_client_port"	default="8890" />
+	<arg name="local_vid_server_port"	default="6038" />
+	<arg name="camera_calibration"		default="$(find tello_driver)/cfg/960x720.yaml" />    
+	<arg name="namespace"			default="tello" />
+
+	<group ns="$(arg namespace)">
+
+		<node pkg="tello_driver" name="tello_driver_node" type="tello_driver_node" output="screen">
+			<param name="local_cmd_client_port" value="$(arg local_cmd_client_port)" />
+			<param name="local_vid_server_port" value="$(arg local_vid_server_port)" />
+			<param name="tello_ip" value="$(arg tello_ip)" />
+			<param name="tello_cmd_server_port" value="$(arg tello_cmd_server_port)" />
+			<param name="connect_timeout_sec" value="10.0" />
+			<param name="stream_h264_video" value="true" />
+			<param name="camera_calibration" value="$(arg camera_calibration)" />			
+		</node>
+
+		<!-- do this to get the raw image from tello drone  -->
+		<node pkg="image_transport" name="image_compressed" type="republish" args="raw in:=image_raw compressed out:=image_raw" />
+ 		<!-- end -->
+
+		 <!-- Add this to get h264 decompressed image to work with -->
+		<node  pkg="image_transport" name="image_decompressed" type="republish" args="compressed in:=image_raw raw out:=image_raw_decompressed">
+			<param name="image_transport" value="h264"/>
+		</node> 
+		<!-- end -->
+
+		<!-- Add this to open tello camera -->
+		<!-- <node name="image_view" pkg="image_view" type="image_view" respawn="false" output="screen">
+    		<remap from="image" to="/tello/image_raw_decompressed"/>
+    		<param name="autosize" value="true" />
+  		</node> -->
+		<!-- end -->
+
+		<node pkg="rqt_image_view" type="rqt_image_view" name="image_view_tello" args="/tello/image_raw_decompressed" >
+			<param name="autosize" value="true" />
+		</node>
+		
+		
+	</group>
+
+</launch>
